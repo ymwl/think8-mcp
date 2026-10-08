@@ -1,0 +1,170 @@
+<?php
+
+declare(strict_types=1);
+
+namespace ymwl\think8mcp\Commands;
+
+use think\console\Command;
+use think\console\Input;
+use think\console\Output;
+use think\console\input\Option;
+use ymwl\think8mcp\MCP\Server;
+use ymwl\think8mcp\MCP\Tools\ToolInterface;
+
+/**
+ * Think8 MCP MCP Server 启动命令
+ *
+ * 使用方式：php think mcp:serve
+ * 可选参数：--debug 开启调试日志输出到 STDERR
+ */
+class ServeCommand extends Command
+{
+    /**
+     * 工具配置键 → 工具类名映射表
+     * 新增工具只需在此处追加一行，无需修改其他代码
+     */
+    private const TOOL_MAP = [
+        'app_info'         => \ymwl\think8mcp\MCP\Tools\AppInfoTool::class,
+        'routes'           => \ymwl\think8mcp\MCP\Tools\RoutesTool::class,
+        'schema'           => \ymwl\think8mcp\MCP\Tools\SchemaTool::class,
+        'db_connections'   => \ymwl\think8mcp\MCP\Tools\DatabaseConnectionsTool::class,
+        'commands'         => \ymwl\think8mcp\MCP\Tools\CommandsTool::class,
+        'logs'             => \ymwl\think8mcp\MCP\Tools\LogsTool::class,
+        'last_error'       => \ymwl\think8mcp\MCP\Tools\LastErrorTool::class,
+        'config'           => \ymwl\think8mcp\MCP\Tools\ConfigTool::class,
+        'execute_sql'      => \ymwl\think8mcp\MCP\Tools\ExecuteSqlTool::class,
+        'run_php'          => \ymwl\think8mcp\MCP\Tools\RunPhpTool::class,
+        'format_code'      => \ymwl\think8mcp\MCP\Tools\FormatCodeTool::class,
+        'get_absolute_url' => \ymwl\think8mcp\MCP\Tools\GetAbsoluteUrlTool::class,
+    ];
+
+    protected function configure(): void
+    {
+        $this->setName('mcp:serve')
+            ->setDescription('Start the Think8 MCP MCP Server')
+            ->addOption(
+                'debug',
+                'd',
+                Option::VALUE_NONE,
+                '开启调试模式，将详细日志输出到 STDERR'
+            );
+    }
+
+    protected function execute(Input $input, Output $output): int
+    {
+        // 尽早开启输出缓冲，防止 ThinkPHP 启动/运行期间的任何意外 echo/print 污染 JSON-RPC STDOUT
+        $startObLevel = ob_get_level();
+        ob_start();
+
+        $debug = (bool)$input->getOption('debug');
+
+        // 长驻进程必须解除 PHP 的默认资源限制，否则大表 schema 或慢查询会 OOM / 超时崩溃
+        ini_set('memory_limit', '-1');
+        set_time_limit(0);
+
+        // 确保所有 PHP 错误输出到 STDERR，不污染 JSON-RPC STDOUT 流
+        ini_set('display_errors', '0');
+        ini_set('log_errors', '1');
+        ini_set('error_log', 'stderr');
+
+        // Fatal Error 时记录到 STDERR 再退出，方便排查
+        register_shutdown_function(static function (): void {
+            $err = error_get_last();
+            if ($err !== null && in_array($err['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+                fwrite(STDERR, '[think8-mcp] Fatal: ' . $err['message'] . ' in ' . $err['file'] . ':' . $err['line'] . "\n");
+            }
+        });
+
+        // 忽略 SIGPIPE：客户端断开时 fwrite(STDOUT) 会触发 SIGPIPE，默认行为是终止进程。
+        // 忽略后 fwrite 仅返回 false，由 Server::sendResponse() 检测并优雅退出。
+        if (function_exists('pcntl_signal')) {
+            pcntl_async_signals(true);
+            pcntl_signal(SIGPIPE, SIG_IGN);
+        }
+
+        if ($debug) {
+            fwrite(STDERR, "启动 Think8 MCP MCP Server...\n");
+        }
+
+        $app    = $this->app;
+        $config = [];
+
+        try {
+            $config = (array)$app->config->get('mcp', []);
+        } catch (\Throwable $e) {
+            fwrite(STDERR, "警告：无法读取 mcp 配置，使用默认配置。错误：{$e->getMessage()}\n");
+        }
+
+        // 默认全部启用
+        $toolsConfig = $config['tools'] ?? array_fill_keys(array_keys(self::TOOL_MAP), true);
+
+        $server = new Server($debug);
+
+        // 自动发现并注册内置工具
+        foreach (self::TOOL_MAP as $key => $class) {
+            if (!empty($toolsConfig[$key])) {
+                $tool = new $class($app);
+                if ($tool instanceof ToolInterface) {
+                    $server->registerTool($tool);
+                    if ($debug) {
+                        fwrite(STDERR, "已加载工具: {$tool->getName()}\n");
+                    }
+                }
+            }
+        }
+
+        // 注册宿主项目自定义工具（config/mcp.php 的 custom_tools，类名数组）
+        foreach ((array)($config['custom_tools'] ?? []) as $class) {
+            if (!is_string($class) || !class_exists($class)) {
+                fwrite(STDERR, "跳过无效的自定义工具类: " . (is_string($class) ? $class : gettype($class)) . "\n");
+                continue;
+            }
+
+            try {
+                $tool = new $class($app);
+                if ($tool instanceof ToolInterface) {
+                    $server->registerTool($tool);
+                    if ($debug) {
+                        fwrite(STDERR, "已加载自定义工具: {$tool->getName()}\n");
+                    }
+                } else {
+                    fwrite(STDERR, "自定义工具未实现 ToolInterface，已跳过: {$class}\n");
+                }
+            } catch (\Throwable $e) {
+                fwrite(STDERR, "自定义工具实例化失败，已跳过: {$class}（{$e->getMessage()}）\n");
+            }
+        }
+
+        if ($debug) {
+            fwrite(STDERR, "MCP Server 就绪，等待请求（通过 STDIN）...\n");
+            fwrite(STDERR, "按 Ctrl+C 停止服务器\n");
+        }
+
+        // 加载 Guidelines
+        $guidelinesLoader = new \ymwl\think8mcp\MCP\GuidelinesLoader($app->getRootPath());
+        $server->setInstructions($guidelinesLoader->load());
+
+        // 加载 Prompts
+        $promptsRegistry = new \ymwl\think8mcp\MCP\PromptsRegistry($app->getRootPath());
+        $promptsRegistry->loadAll();
+        $server->setPromptsRegistry($promptsRegistry);
+
+        // 加载 Skills
+        $skillsRegistry = new \ymwl\think8mcp\MCP\SkillsRegistry($app->getRootPath());
+        $skillsRegistry->loadAll();
+        $server->setSkillsRegistry($skillsRegistry);
+        if ($debug) {
+            fwrite(STDERR, "Skills 系统已加载（" . count($skillsRegistry->list()) . " 个技能）\n");
+        }
+
+        // 丢弃启动期间缓冲区中积累的任何意外 STDOUT 输出，确保 JSON-RPC 流干净
+        while (ob_get_level() > $startObLevel) {
+            ob_end_clean();
+        }
+
+        // 启动服务器主循环（内部为常驻循环，正常情况下不会返回）
+        $server->run();
+
+        return 0;
+    }
+}

@@ -1,0 +1,44 @@
+{
+    "name": "ymwl/think8-mcp",
+    "description": "MCP (Model Context Protocol) server for ThinkPHP 8.x — let AI tools (Claude Code, Cursor, Windsurf) understand and operate your project.",
+    "type": "library",
+    "keywords": [
+        "thinkphp",
+        "mcp",
+        "ai",
+        "model-context-protocol",
+        "claude",
+        "cursor"
+    ],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "ymwl",
+            "email": "com_80zx@163.com"
+        }
+    ],
+    "require": {
+        "php": ">=8.0.0",
+        "topthink/framework": "^8.0"
+    },
+    "suggest": {
+        "friendsofphp/php-cs-fixer": "用于 format_code 工具的代码格式化功能（^3.0）"
+    },
+    "autoload": {
+        "psr-4": {
+            "ymwl\\think8mcp\\": "src/"
+        }
+    },
+    "extra": {
+        "think": {
+            "services": [
+                "ymwl\\think8mcp\\McpServiceProvider"
+            ],
+            "config": {
+                "mcp": "config/mcp.php"
+            }
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
