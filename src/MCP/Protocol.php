@@ -216,7 +216,9 @@ class Protocol
     {
         return json_encode(
             $data,
-            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+            // JSON_INVALID_UTF8_SUBSTITUTE：工具输出可能含非法 UTF-8（图片响应体、BLOB 列等），
+            // 替换为占位符而非直接抛异常导致响应 ID 丢失、客户端超时
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR
         );
     }
 

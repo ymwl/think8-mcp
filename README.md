@@ -161,7 +161,7 @@ AI 工具连接后可使用以下 18 个 MCP 工具（均可在 `config/mcp.php`
 
 ### `probe_http` 白名单限制
 
-仅允许请求白名单内的 host：回环地址（`127.0.0.1` / `localhost` / `::1`）与**解析到回环地址的本机域名**（如 hosts 中指向 `127.0.0.1` 的开发域名）始终放行；其他域名需在 `config/mcp.php` 的 `probe.allowed_hosts` 中追加。仅支持 `GET` / `HEAD` / `POST`，默认不跟随重定向，响应体截断返回，`Set-Cookie` 仅展示名称。
+仅允许请求白名单内的 host：回环地址（`127.0.0.1` / `localhost` / `::1`）与**解析到回环地址的本机域名**（如 hosts 中指向 `127.0.0.1` 的开发域名）始终放行；其他域名需在 `config/mcp.php` 的 `probe.allowed_hosts` 中追加。仅支持 `GET` / `HEAD` / `POST`，默认不跟随重定向，响应体截断返回（**二进制响应如图片/文件仅提示字节数、不展示正文**），`Set-Cookie` 仅展示名称。
 
 ---
 

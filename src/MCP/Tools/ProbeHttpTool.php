@@ -323,8 +323,9 @@ class ProbeHttpTool implements ToolInterface
     {
         $output = sprintf("%s %s → %s（%d ms）\n", $method, $url, $status > 0 ? (string)$status : '无响应', $ms);
 
-        $interest = ['content-type', 'content-length', 'location', 'x-powered-by', 'server'];
-        $cookies  = [];
+        $interest    = ['content-type', 'content-length', 'location', 'x-powered-by', 'server'];
+        $cookies     = [];
+        $contentType = '';
 
         foreach ($rawHeaders as $line) {
             if ($line === '' || str_starts_with($line, 'HTTP/')) {
@@ -345,6 +346,9 @@ class ProbeHttpTool implements ToolInterface
             }
 
             if (in_array($name, $interest, true)) {
+                if ($name === 'content-type') {
+                    $contentType = $value;
+                }
                 $output .= "{$name}: {$value}\n";
             }
         }
@@ -358,16 +362,45 @@ class ProbeHttpTool implements ToolInterface
         }
 
         if ($method !== 'HEAD' && $body !== '') {
-            $length = mb_strlen($body);
-            $output .= "\nBody" . ($length > $maxBody ? "（前 {$maxBody} 字符，共 {$length}）" : '') . ":\n";
-            $output .= mb_substr($body, 0, $maxBody);
+            if ($this->looksBinary($contentType, $body)) {
+                $output .= sprintf("\nBody: [二进制响应，未展示；共 %d 字节]", strlen($body));
+            } else {
+                $bodyText = $this->sanitizeUtf8($body);
+                $length   = mb_strlen($bodyText);
+                $output  .= "\nBody" . ($length > $maxBody ? "（前 {$maxBody} 字符，共 {$length}）" : '') . ":\n";
+                $output  .= mb_substr($bodyText, 0, $maxBody);
 
-            if ($length > $maxBody) {
-                $output .= "\n...(已截断)";
+                if ($length > $maxBody) {
+                    $output .= "\n...(已截断)";
+                }
             }
         }
 
         return $output;
+    }
+
+    /**
+     * 判断响应是否为二进制内容（图片/压缩包等不展示正文，避免破坏 JSON 编码）
+     */
+    private function looksBinary(string $contentType, string $body): bool
+    {
+        $contentType = strtolower($contentType);
+
+        foreach (['image/', 'audio/', 'video/', 'font/', 'application/octet-stream', 'application/zip', 'application/pdf'] as $prefix) {
+            if (str_starts_with($contentType, $prefix)) {
+                return true;
+            }
+        }
+
+        return str_contains(substr($body, 0, 2000), "\0");
+    }
+
+    /**
+     * 文本净化：无效 UTF-8 序列替换为合法字符，防止 JSON 编码失败
+     */
+    private function sanitizeUtf8(string $text): string
+    {
+        return mb_convert_encoding($text, 'UTF-8', 'UTF-8');
     }
 
     /**
