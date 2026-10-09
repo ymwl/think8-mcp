@@ -31,7 +31,7 @@ class ExecuteSqlTool implements ToolInterface
 
     public function getDescription(): string
     {
-        return '在 ThinkPHP 数据库连接上执行 SQL 查询，只允许只读查询（SELECT/SHOW/DESCRIBE/EXPLAIN/WITH CTE/VALUES/TABLE）。';
+        return '在 ThinkPHP 数据库连接上执行 SQL 查询，只允许只读查询（SELECT/SHOW/DESCRIBE/EXPLAIN/WITH CTE/VALUES/TABLE）。结果以紧凑 TSV（制表符分隔）返回，最多 100 行、单元格最多 40 字符，需自行用 LIMIT 控制行数。';
     }
 
     public function getInputSchema(): array
@@ -79,10 +79,10 @@ class ExecuteSqlTool implements ToolInterface
         }
 
         if (empty($rows)) {
-            return "查询执行成功，结果为空（0 行）。\n\nSQL：{$sql}";
+            return '查询执行成功，结果为空（0 行）。';
         }
 
-        return $this->formatResultTable($sql, $rows);
+        return $this->formatResultTable($rows);
     }
 
     /**
@@ -202,67 +202,36 @@ class ExecuteSqlTool implements ToolInterface
     }
 
     /**
-     * 将查询结果格式化为表格文本
+     * 将查询结果格式化为紧凑 TSV 文本（制表符分隔，每行一条记录）
      *
      * @param array<int, array<string, mixed>> $rows
      */
-    private function formatResultTable(string $sql, array $rows): string
+    private function formatResultTable(array $rows): string
     {
-        $totalRows  = count($rows);
-        $truncated  = $totalRows > self::MAX_ROWS;
+        $totalRows   = count($rows);
+        $truncated   = $totalRows > self::MAX_ROWS;
         $displayRows = $truncated ? array_slice($rows, 0, self::MAX_ROWS) : $rows;
 
         // 获取列名
         $columns = array_keys($displayRows[0]);
 
-        // 计算每列宽度
-        $colWidths = [];
-        foreach ($columns as $col) {
-            $colWidths[$col] = min(mb_strlen((string)$col), self::MAX_COL_WIDTH);
-        }
+        $header = $truncated
+            ? sprintf("查询结果：共 %d 行（仅显示前 %d 行）\n", $totalRows, self::MAX_ROWS)
+            : sprintf("查询结果：共 %d 行\n", $totalRows);
+
+        $lines = [implode("\t", $columns)];
 
         foreach ($displayRows as $row) {
+            $cells = [];
             foreach ($columns as $col) {
-                $val              = $this->formatCellValue($row[$col] ?? null);
-                $len              = min(mb_strlen($val), self::MAX_COL_WIDTH);
-                $colWidths[$col]  = max($colWidths[$col], $len);
+                $value   = $this->formatCellValue($row[$col] ?? null);
+                $value   = $this->sanitizeCell($value);
+                $cells[] = $this->truncateCell($value, self::MAX_COL_WIDTH);
             }
+            $lines[] = implode("\t", $cells);
         }
 
-        // 构建表头
-        $separator = '+';
-        $header    = '|';
-        foreach ($columns as $col) {
-            $width      = $colWidths[$col];
-            $separator .= str_repeat('-', $width + 2) . '+';
-            $header    .= ' ' . $this->mbPad($col, $width) . ' |';
-        }
-
-        $output  = "SQL：{$sql}\n\n";
-        $output .= $separator . "\n";
-        $output .= $header . "\n";
-        $output .= $separator . "\n";
-
-        foreach ($displayRows as $row) {
-            $line = '|';
-            foreach ($columns as $col) {
-                $val    = $this->formatCellValue($row[$col] ?? null);
-                $val    = $this->truncateCell($val, self::MAX_COL_WIDTH);
-                $width  = $colWidths[$col];
-                $line  .= ' ' . $this->mbPad($val, $width) . ' |';
-            }
-            $output .= $line . "\n";
-        }
-
-        $output .= $separator . "\n";
-
-        if ($truncated) {
-            $output .= "\n... 共 {$totalRows} 行，已截断显示前 " . self::MAX_ROWS . " 行\n";
-        } else {
-            $output .= "\n共 {$totalRows} 行\n";
-        }
-
-        return $output;
+        return $header . implode("\n", $lines) . "\n";
     }
 
     /**
@@ -286,6 +255,16 @@ class ExecuteSqlTool implements ToolInterface
     }
 
     /**
+     * 清洗单元格值：换行符转义、制表符替换，避免破坏 TSV 行结构
+     */
+    private function sanitizeCell(string $value): string
+    {
+        $value = str_replace(["\r\n", "\r", "\n"], '\\n', $value);
+
+        return str_replace("\t", ' ', $value);
+    }
+
+    /**
      * 截断超长单元格值
      */
     private function truncateCell(string $value, int $maxLen): string
@@ -295,20 +274,6 @@ class ExecuteSqlTool implements ToolInterface
         }
 
         return mb_substr($value, 0, $maxLen - 3) . '...';
-    }
-
-    /**
-     * 按显示宽度右侧补空格（兼容 PHP 8.0，替代 PHP 8.3 才有的 mb_str_pad）
-     */
-    private function mbPad(string $value, int $width): string
-    {
-        $len = mb_strlen($value);
-
-        if ($len >= $width) {
-            return $value;
-        }
-
-        return $value . str_repeat(' ', $width - $len);
     }
 
     /**

@@ -69,7 +69,12 @@ class FormatCodeTool implements ToolInterface
 
         $dryRun = !empty($params['dry_run']);
 
-        return $this->runFixer($binary, $targetPath, $configFile, $dryRun);
+        // 未配置项目级 .php-cs-fixer.php 时，使用 runtime 下自动生成的默认规则，并明确提示
+        $note = ($configFile !== null && str_ends_with($configFile, 'mcp_php_cs_fixer.php'))
+            ? "[提示] 项目未配置 .php-cs-fixer.php，本次使用 runtime/mcp_php_cs_fixer.php 中的默认规则。\n\n"
+            : '';
+
+        return $note . $this->runFixer($binary, $targetPath, $configFile, $dryRun);
     }
 
     private function resolvePath(string $rootPath, string $relativePath): ?string
@@ -96,22 +101,32 @@ class FormatCodeTool implements ToolInterface
             return $configFile;
         }
 
-        // 生成默认配置文件
-        $this->generateDefaultConfig($configFile, $rootPath);
+        // 不往项目根目录写文件：默认规则生成到 runtime/ 下（临时文件，可随时删除）
+        $runtimeConfig = rtrim($this->app->getRuntimePath(), '\\/') . DIRECTORY_SEPARATOR . 'mcp_php_cs_fixer.php';
 
-        return file_exists($configFile) ? $configFile : null;
+        if (!is_file($runtimeConfig) && !$this->generateDefaultConfig($runtimeConfig, $rootPath)) {
+            return null;
+        }
+
+        return is_file($runtimeConfig) ? $runtimeConfig : null;
     }
 
-    private function generateDefaultConfig(string $configFile, string $rootPath): void
+    /**
+     * 生成默认规则配置到 $configFile（目录用绝对路径指向项目），返回是否成功
+     */
+    private function generateDefaultConfig(string $configFile, string $rootPath): bool
     {
-        $content = <<<'PHP'
+        // 路径统一为 / 分隔，避免转义问题；配置文件可位于 runtime/ 等任意目录
+        $root = rtrim(str_replace('\\', '/', $rootPath), '/');
+
+        $content = <<<PHP
         <?php
 
-        $finder = PhpCsFixer\Finder::create()
+        \$finder = PhpCsFixer\Finder::create()
             ->in([
-                __DIR__ . '/app',
-                __DIR__ . '/route',
-                __DIR__ . '/config',
+                '{$root}/app',
+                '{$root}/route',
+                '{$root}/config',
             ])
             ->exclude(['vendor', 'runtime', 'public'])
             ->name('*.php');
@@ -131,10 +146,10 @@ class FormatCodeTool implements ToolInterface
                 'method_argument_space'      => ['on_multiline' => 'ensure_fully_multiline'],
                 'single_trait_insert_per_statement' => true,
             ])
-            ->setFinder($finder);
+            ->setFinder(\$finder);
         PHP;
 
-        @file_put_contents($configFile, $content);
+        return file_put_contents($configFile, $content) !== false;
     }
 
     private function runFixer(string $binary, string $targetPath, ?string $configFile, bool $dryRun): string

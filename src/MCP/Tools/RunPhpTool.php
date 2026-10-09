@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace ymwl\think8mcp\MCP\Tools;
 
 use think\App;
+use ymwl\think8mcp\MCP\Concerns\TruncatesOutput;
 
 /**
  * 在 ThinkPHP 应用上下文中执行任意 PHP 代码
@@ -14,6 +15,8 @@ use think\App;
  */
 class RunPhpTool implements ToolInterface
 {
+    use TruncatesOutput;
+
     public function __construct(
         private App $app
     ) {}
@@ -25,7 +28,7 @@ class RunPhpTool implements ToolInterface
 
     public function getDescription(): string
     {
-        return '在 ThinkPHP 应用上下文中执行任意 PHP 代码。可以访问所有模型、Db 类、配置、助手函数等。无需 <?php 标签。';
+        return '在 ThinkPHP 应用上下文中执行任意 PHP 代码。可以访问所有模型、Db 类、配置、助手函数等。无需 <?php 标签。输出过长时自动截断（保留头尾），可用 max_lines 放宽行数上限。';
     }
 
     public function getInputSchema(): array
@@ -36,6 +39,12 @@ class RunPhpTool implements ToolInterface
                 'code' => [
                     'type'        => 'string',
                     'description' => '要执行的 PHP 代码，无需 <?php 标签。用 var_dump()、print_r() 或 echo 输出结果。',
+                ],
+                'max_lines' => [
+                    'type'        => 'integer',
+                    'description' => '输出行数上限（默认 300，最大 2000），需要完整输出时调大；超长单行仍按 2000 字符截断。',
+                    'minimum'     => 1,
+                    'maximum'     => 2000,
                 ],
             ],
             'required' => ['code'],
@@ -68,8 +77,10 @@ class RunPhpTool implements ToolInterface
             return '错误：无法创建临时脚本文件，请检查 runtime/ 目录权限。';
         }
 
+        $maxLines = $this->resolveMaxLines($params['max_lines'] ?? null);
+
         try {
-            return $this->runScript($tempFile);
+            return $this->truncateOutput($this->runScript($tempFile), $maxLines);
         } finally {
             @unlink($tempFile);
         }

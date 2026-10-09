@@ -5,12 +5,15 @@ declare(strict_types=1);
 namespace ymwl\think8mcp\MCP\Tools;
 
 use think\App;
+use ymwl\think8mcp\MCP\Concerns\TruncatesOutput;
 
 /**
  * 命令工具 - 列出或执行 ThinkPHP think 命令
  */
 class CommandsTool implements ToolInterface
 {
+    use TruncatesOutput;
+
     /**
      * 默认禁止执行的命令（安全限制）
      */
@@ -33,7 +36,7 @@ class CommandsTool implements ToolInterface
 
     public function getDescription(): string
     {
-        return '执行 ThinkPHP think 命令，如数据库迁移、生成代码等。部分危险命令被禁止。也可通过传入 command="list" 来列出所有可用命令。';
+        return '执行 ThinkPHP think 命令，如数据库迁移、生成代码等。部分危险命令被禁止。也可通过传入 command="list" 来列出所有可用命令。输出过长时自动截断（保留头尾），可用 max_lines 放宽行数上限。';
     }
 
     public function getInputSchema(): array
@@ -50,6 +53,12 @@ class CommandsTool implements ToolInterface
                     'description' => '命令的额外参数列表（可选）',
                     'items'       => ['type' => 'string'],
                 ],
+                'max_lines' => [
+                    'type'        => 'integer',
+                    'description' => '输出行数上限（默认 300，最大 2000），需要完整输出时调大；超长单行仍按 2000 字符截断。',
+                    'minimum'     => 1,
+                    'maximum'     => 2000,
+                ],
             ],
             'required' => ['command'],
         ];
@@ -63,11 +72,13 @@ class CommandsTool implements ToolInterface
             return "错误：command 参数不能为空。传入 \"list\" 可查看所有可用命令。";
         }
 
+        $maxLines = $this->resolveMaxLines($params['max_lines'] ?? null);
+
         if ($command === 'list') {
-            return $this->listCommands();
+            return $this->truncateOutput($this->listCommands(), $maxLines);
         }
 
-        return $this->runCommand($command, $params['args'] ?? []);
+        return $this->truncateOutput($this->runCommand($command, $params['args'] ?? []), $maxLines);
     }
 
     /**
@@ -105,9 +116,7 @@ class CommandsTool implements ToolInterface
                 return "无法获取命令列表。";
             }
 
-            $output = "ThinkPHP 可用命令列表：\n\n";
-            $output .= sprintf("%-40s %s\n", '命令', '描述');
-            $output .= str_repeat('-', 80) . "\n";
+            $output = "ThinkPHP 可用命令列表：\n";
 
             ksort($commands);
             foreach ($commands as $name => $command) {
@@ -120,7 +129,7 @@ class CommandsTool implements ToolInterface
                     $description = '';
                 }
 
-                $output .= sprintf("%-40s %s\n", $name, $description);
+                $output .= "{$name}  {$description}\n";
             }
 
             return $output;
@@ -171,7 +180,6 @@ class CommandsTool implements ToolInterface
 
         return "命令: php think {$command}" . ($argsString ? ' ' . trim($argsString) : '') . "\n"
             . "状态: {$status}\n"
-            . str_repeat('-', 60) . "\n"
             . ($output ?: '(无输出)');
     }
 

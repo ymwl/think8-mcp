@@ -17,6 +17,9 @@ class LogsTool implements ToolInterface
     private const DEFAULT_LINES = 100;
     private const MAX_LINES     = 1000;
 
+    /** 过滤模式下从文件末尾向前扫描的最大行数（防超大日志卡死） */
+    private const MAX_SCAN_LINES = 200000;
+
     public function __construct(
         private App $app
     ) {}
@@ -28,7 +31,7 @@ class LogsTool implements ToolInterface
 
     public function getDescription(): string
     {
-        return '读取 ThinkPHP 应用的运行日志（runtime/log 目录）。支持按日期筛选和指定行数。';
+        return '读取 ThinkPHP 应用的运行日志（runtime/log 目录）。支持日期、级别、关键字过滤与行数控制。';
     }
 
     public function getInputSchema(): array
@@ -52,6 +55,10 @@ class LogsTool implements ToolInterface
                     'description' => '过滤日志级别：error、warning、info、debug（可选，不填则返回所有级别）',
                     'enum'        => ['error', 'warning', 'info', 'debug', 'notice', 'sql'],
                 ],
+                'keyword' => [
+                    'type'        => 'string',
+                    'description' => '按关键字过滤日志行（不区分大小写，可与 date/level 组合使用）。',
+                ],
             ],
             'required' => [],
         ];
@@ -63,6 +70,11 @@ class LogsTool implements ToolInterface
         $lines    = max($lines, 1);
         $date     = isset($params['date']) ? trim((string)$params['date']) : null;
         $level    = isset($params['level']) ? strtolower(trim((string)$params['level'])) : null;
+        $keyword  = isset($params['keyword']) ? trim((string)$params['keyword']) : null;
+
+        if ($keyword === '') {
+            $keyword = null;
+        }
 
         // 验证日期格式
         if ($date !== null && !preg_match('/^\d{8}$/', $date)) {
@@ -76,16 +88,16 @@ class LogsTool implements ToolInterface
         }
 
         if ($date !== null) {
-            return $this->readLogByDate($logPath, $date, $lines, $level);
+            return $this->readLogByDate($logPath, $date, $lines, $level, $keyword);
         }
 
-        return $this->readLatestLog($logPath, $lines, $level);
+        return $this->readLatestLog($logPath, $lines, $level, $keyword);
     }
 
     /**
      * 读取最新的日志文件
      */
-    private function readLatestLog(string $logPath, int $lines, ?string $level): string
+    private function readLatestLog(string $logPath, int $lines, ?string $level, ?string $keyword): string
     {
         $logFile = $this->findLatestLogFile($logPath);
 
@@ -93,40 +105,28 @@ class LogsTool implements ToolInterface
             return "日志目录 {$logPath} 中没有找到任何日志文件。";
         }
 
-        return $this->readLogFile($logFile, $lines, $level);
+        return $this->readLogFile($logFile, $lines, $level, $keyword);
     }
 
     /**
      * 按日期读取日志文件
      */
-    private function readLogByDate(string $logPath, string $date, int $lines, ?string $level): string
+    private function readLogByDate(string $logPath, string $date, int $lines, ?string $level, ?string $keyword): string
     {
-        // ThinkPHP 日志目录结构：runtime/log/YYYYMM/DD.log
-        $year  = substr($date, 0, 4);
-        $month = substr($date, 4, 2);
-        $day   = substr($date, 6, 2);
+        $logFile = $this->findLogFileByDate($logPath, $date);
 
-        // 可能的路径格式
-        $possiblePaths = [
-            $logPath . DIRECTORY_SEPARATOR . "{$year}{$month}" . DIRECTORY_SEPARATOR . "{$day}.log",
-            $logPath . DIRECTORY_SEPARATOR . "{$year}-{$month}" . DIRECTORY_SEPARATOR . "{$day}.log",
-            $logPath . DIRECTORY_SEPARATOR . "{$date}.log",
-            $logPath . DIRECTORY_SEPARATOR . "{$year}" . DIRECTORY_SEPARATOR . "{$month}" . DIRECTORY_SEPARATOR . "{$day}.log",
-        ];
-
-        foreach ($possiblePaths as $path) {
-            if (is_file($path)) {
-                return $this->readLogFile($path, $lines, $level);
-            }
+        if ($logFile === null) {
+            return "未找到日期 {$date} 的日志文件。\n\n已搜索以下路径：\n"
+                . implode("\n", $this->logDateCandidates($logPath, $date));
         }
 
-        return "未找到日期 {$date} 的日志文件。\n\n已搜索以下路径：\n" . implode("\n", $possiblePaths);
+        return $this->readLogFile($logFile, $lines, $level, $keyword);
     }
 
     /**
-     * 读取日志文件内容（取最后 N 行）
+     * 读取日志文件内容（取最后 N 行或最后 N 条匹配）
      */
-    private function readLogFile(string $filePath, int $lines, ?string $level): string
+    private function readLogFile(string $filePath, int $lines, ?string $level, ?string $keyword): string
     {
         if (!is_readable($filePath)) {
             return "无法读取日志文件：{$filePath}（权限不足）";
@@ -137,13 +137,90 @@ class LogsTool implements ToolInterface
             return "日志文件为空：{$filePath}";
         }
 
-        // 从文件末尾读取，避免加载超大文件
-        $content = $this->readTailLines($filePath, $lines * 2); // 多读一些以便过滤
+        $filtered = ($level !== null || $keyword !== null);
+        $complete = true;
 
-        $allLines = explode("\n", $content);
-        $allLines = array_filter(array_map('rtrim', $allLines));
+        if (!$filtered) {
+            // 无过滤：直接从文件末尾读取指定行数
+            $allLines = $this->readTailLines($filePath, $lines + 1);
+            $allLines = array_values(array_filter(array_map('rtrim', explode("\n", $allLines))));
+        } else {
+            // 有过滤：渐进扫描，尽量凑足 $lines 条匹配（避免"只读末尾"造成的匹配假阴性）
+            $result   = $this->collectFilteredTail($filePath, $lines, $level, $keyword);
+            $allLines = $result['lines'];
+            $complete = $result['complete'];
+        }
 
-        // 按级别过滤
+        // 取最后 N 行
+        if (count($allLines) > $lines) {
+            $allLines = array_slice($allLines, -$lines);
+        }
+
+        if (empty($allLines)) {
+            $suffix = $complete
+                ? ''
+                : "\n\n注意：已扫描至扫描上限（" . self::MAX_SCAN_LINES . " 行），更早内容未扫描。";
+
+            return "日志文件 {$filePath} 中没有找到匹配的日志记录"
+                . $this->describeFilters($level, $keyword) . "。{$suffix}";
+        }
+
+        $scope = $filtered
+            ? sprintf('匹配 %d 行', count($allLines))
+            : sprintf('最后 %d 行', count($allLines));
+
+        $output = sprintf(
+            "日志 %s（%s）%s%s\n\n",
+            $filePath,
+            $this->formatFileSize($fileSize),
+            $scope,
+            $this->describeFilters($level, $keyword)
+        );
+        $output .= implode("\n", $allLines);
+
+        if (!$complete) {
+            $output .= "\n\n注意：已扫描至扫描上限（" . self::MAX_SCAN_LINES . " 行），更早内容未扫描。";
+        }
+
+        return $output;
+    }
+
+    /**
+     * 过滤模式下从文件末尾渐进扫描，尽量凑足 $lines 条匹配
+     *
+     * @return array{lines: string[], complete: bool} complete=false 表示达到扫描上限、更早内容未扫描
+     */
+    private function collectFilteredTail(string $filePath, int $lines, ?string $level, ?string $keyword): array
+    {
+        $readLines = max($lines * 4, 400);
+
+        while (true) {
+            $content  = $this->readTailLines($filePath, $readLines);
+            $allLines = array_values(array_filter(array_map('rtrim', explode("\n", $content))));
+            $matched  = $this->applyFilters($allLines, $level, $keyword);
+
+            // 读到文件开头（行数不足请求量）或匹配足够，或达到扫描上限
+            $reachedStart = substr_count($content, "\n") < $readLines;
+
+            if (count($matched) >= $lines || $reachedStart || $readLines >= self::MAX_SCAN_LINES) {
+                return [
+                    'lines'    => $matched,
+                    'complete' => $reachedStart,
+                ];
+            }
+
+            $readLines *= 2;
+        }
+    }
+
+    /**
+     * 应用级别与关键字过滤，返回重新索引后的匹配行
+     *
+     * @param string[] $allLines
+     * @return string[]
+     */
+    private function applyFilters(array $allLines, ?string $level, ?string $keyword): array
+    {
         if ($level !== null) {
             $allLines = array_filter($allLines, function (string $line) use ($level): bool {
                 return stripos($line, "[{$level}]") !== false
@@ -152,29 +229,31 @@ class LogsTool implements ToolInterface
             });
         }
 
-        $allLines = array_values($allLines);
-
-        // 取最后 N 行
-        if (count($allLines) > $lines) {
-            $allLines = array_slice($allLines, -$lines);
+        if ($keyword !== null) {
+            $allLines = array_filter(
+                $allLines,
+                static fn(string $line): bool => stripos($line, $keyword) !== false
+            );
         }
 
-        if (empty($allLines)) {
-            $levelMsg = $level ? "（级别: {$level}）" : '';
-            return "日志文件 {$filePath} 中没有找到匹配的日志记录{$levelMsg}。";
-        }
-
-        $output = sprintf(
-            "日志文件：%s\n文件大小：%s\n显示最后 %d 行%s\n",
-            $filePath,
-            $this->formatFileSize($fileSize),
-            count($allLines),
-            $level ? "（级别过滤：{$level}）" : ''
-        );
-        $output .= str_repeat('=', 80) . "\n\n";
-        $output .= implode("\n", $allLines);
-
-        return $output;
+        return array_values($allLines);
     }
 
+    /**
+     * 生成过滤条件描述，如 "（级别: error，关键字: upload）"
+     */
+    private function describeFilters(?string $level, ?string $keyword): string
+    {
+        $parts = [];
+
+        if ($level !== null) {
+            $parts[] = "级别: {$level}";
+        }
+
+        if ($keyword !== null) {
+            $parts[] = "关键字: {$keyword}";
+        }
+
+        return $parts === [] ? '' : '（' . implode('，', $parts) . '）';
+    }
 }

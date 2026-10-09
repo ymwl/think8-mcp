@@ -39,7 +39,7 @@ class AppInfoTool implements ToolInterface
         $output = '';
 
         // PHP 版本
-        $output .= "=== PHP 环境 ===\n";
+        $output .= "[PHP 环境]\n";
         $output .= "PHP 版本：" . PHP_VERSION . "\n";
         $output .= "运行模式：" . php_sapi_name() . "\n";
 
@@ -52,19 +52,19 @@ class AppInfoTool implements ToolInterface
         }
 
         // ThinkPHP 版本
-        $output .= "\n=== ThinkPHP 框架 ===\n";
+        $output .= "\n[框架]\n";
         $output .= "框架版本：" . $this->getThinkPhpVersion() . "\n";
 
         // 数据库驱动
-        $output .= "\n=== 数据库配置 ===\n";
+        $output .= "\n[数据库]\n";
         $output .= $this->getDatabaseInfo();
 
         // 已安装包列表
-        $output .= "\n=== 已安装 Composer 包（非 topthink 内部包，前30个）===\n";
+        $output .= "\n[Composer 包（非 topthink，前30）]\n";
         $output .= $this->getInstalledPackages();
 
         // Model 文件列表
-        $output .= "\n=== Model 文件列表 ===\n";
+        $output .= "\n[Model 文件]\n";
         $output .= $this->getModelList();
 
         return $output;
@@ -158,7 +158,7 @@ class AppInfoTool implements ToolInterface
             foreach ($filtered as $pkg) {
                 $name    = $pkg['name'] ?? '?';
                 $version = $pkg['version'] ?? '?';
-                $lines[] = sprintf("  %-45s %s", $name, $version);
+                $lines[] = "  {$name} {$version}";
             }
 
             return implode("\n", $lines) . "\n";
@@ -204,7 +204,7 @@ class AppInfoTool implements ToolInterface
             $className = pathinfo($file, PATHINFO_FILENAME);
             // 去掉 rootPath 前缀，显示相对路径
             $relativePath = str_replace($rootPath, '', $file);
-            $lines[] = sprintf("  %-30s %s", $className, $relativePath);
+            $lines[] = "  {$className}  {$relativePath}";
         }
 
         return implode("\n", $lines) . "\n";

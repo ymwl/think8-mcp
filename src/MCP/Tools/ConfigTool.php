@@ -74,11 +74,10 @@ class ConfigTool implements ToolInterface
         // 对敏感字段递归打码
         $masked = $this->maskSensitiveValues($value, $key);
 
-        $output = "配置键：{$key}\n";
-        $output .= str_repeat('-', 60) . "\n";
+        $output = "配置 {$key}\n";
 
         if (is_array($masked)) {
-            $output .= json_encode($masked, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+            $output .= json_encode($masked, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         } elseif ($masked === null) {
             $output .= 'null';
         } elseif (is_bool($masked)) {

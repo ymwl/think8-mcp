@@ -26,10 +26,27 @@ trait ReadsLogs
     }
 
     /**
-     * 找最新日志文件（按文件修改时间）
+     * 进程内"最新日志文件"缓存（TTL 60 秒），避免同一会话反复递归扫描日志目录
+     *
+     * @var array<string, array{time: int, file: string}>
      */
-    private function findLatestLogFile(string $logPath): ?string
+    private static array $latestLogCache = [];
+
+    /**
+     * 找最新日志文件（按文件修改时间）
+     *
+     * @param string      $logPath 日志目录
+     * @param string|null $suffix  仅匹配该后缀（如 "_error.log"），null 表示任意 .log
+     */
+    private function findLatestLogFile(string $logPath, ?string $suffix = null): ?string
     {
+        $cacheKey = $logPath . '|' . ($suffix ?? '');
+        $cached   = self::$latestLogCache[$cacheKey] ?? null;
+
+        if ($cached !== null && (time() - $cached['time']) < 60 && is_file($cached['file'])) {
+            return $cached['file'];
+        }
+
         $latestFile = null;
         $latestTime = 0;
 
@@ -40,18 +57,72 @@ trait ReadsLogs
             );
 
             foreach ($iterator as $file) {
-                if ($file->isFile() && $file->getExtension() === 'log') {
-                    $mtime = $file->getMTime();
-                    if ($mtime > $latestTime) {
-                        $latestTime = $mtime;
-                        $latestFile = $file->getPathname();
-                    }
+                if (!$file->isFile() || $file->getExtension() !== 'log') {
+                    continue;
+                }
+
+                if ($suffix !== null && !str_ends_with($file->getBasename(), $suffix)) {
+                    continue;
+                }
+
+                $mtime = $file->getMTime();
+                if ($mtime > $latestTime) {
+                    $latestTime = $mtime;
+                    $latestFile = $file->getPathname();
                 }
             }
         } catch (\Throwable) {
         }
 
+        if ($latestFile !== null) {
+            self::$latestLogCache[$cacheKey] = ['time' => time(), 'file' => $latestFile];
+        }
+
         return $latestFile;
+    }
+
+    /**
+     * 生成按日期的候选日志路径
+     *
+     * @param bool $preferErrorLog true 时 *_error.log 候选排在前面
+     * @return string[]
+     */
+    private function logDateCandidates(string $logPath, string $date, bool $preferErrorLog = false): array
+    {
+        $year  = substr($date, 0, 4);
+        $month = substr($date, 4, 2);
+        $day   = substr($date, 6, 2);
+        $sep   = DIRECTORY_SEPARATOR;
+
+        $errorCandidates = [
+            "{$logPath}{$sep}{$date}_error.log",
+            "{$logPath}{$sep}{$year}{$month}{$sep}{$day}_error.log",
+        ];
+
+        $normalCandidates = [
+            "{$logPath}{$sep}{$year}{$month}{$sep}{$day}.log",
+            "{$logPath}{$sep}{$year}-{$month}{$sep}{$day}.log",
+            "{$logPath}{$sep}{$date}.log",
+            "{$logPath}{$sep}{$year}{$sep}{$month}{$sep}{$day}.log",
+        ];
+
+        return $preferErrorLog
+            ? array_merge($errorCandidates, $normalCandidates)
+            : array_merge($normalCandidates, $errorCandidates);
+    }
+
+    /**
+     * 按日期（YYYYMMDD）解析日志文件路径，未找到返回 null
+     */
+    private function findLogFileByDate(string $logPath, string $date, bool $preferErrorLog = false): ?string
+    {
+        foreach ($this->logDateCandidates($logPath, $date, $preferErrorLog) as $path) {
+            if (is_file($path)) {
+                return $path;
+            }
+        }
+
+        return null;
     }
 
     /**

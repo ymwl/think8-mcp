@@ -56,12 +56,10 @@ class DatabaseConnectionsTool implements ToolInterface
             return "database 配置中没有找到任何连接（connections 为空）。";
         }
 
-        $output  = sprintf("共找到 %d 个数据库连接（默认：%s）\n", count($connections), $default);
-        $output .= str_repeat('=', 80) . "\n\n";
+        $output = sprintf("共 %d 个数据库连接（默认：%s）\n", count($connections), $default);
 
         foreach ($connections as $name => $config) {
             $output .= $this->checkConnection($name, $config, $name === $default);
-            $output .= "\n";
         }
 
         return $output;
@@ -77,24 +75,30 @@ class DatabaseConnectionsTool implements ToolInterface
         $charset  = $config['charset'] ?? 'utf8mb4';
         $prefix   = $config['prefix'] ?? '';
 
-        $label = $isDefault ? " [默认]" : '';
-        $output  = "连接名：{$name}{$label}\n";
-        $output .= sprintf("  驱动：%-10s 主机：%s:%s\n", $driver, $host, $port);
-        $output .= sprintf("  数据库：%-20s 字符集：%s\n", $database, $charset);
-        if ($prefix !== '') {
-            $output .= "  表前缀：{$prefix}\n";
-        }
-
         [$ok, $msg] = $this->testConnection($driver, $host, (int)$port, $database, $username, $config);
 
-        $status  = $ok ? '✓ 连通' : '✗ 失败';
-        $output .= "  状态：{$status}";
-        if ($msg !== '') {
-            $output .= " — {$msg}";
-        }
-        $output .= "\n";
+        // 紧凑一行一连接，如：mysql[默认] mysql 127.0.0.1:3306 库:fhx 字符集:utf8mb4 前缀:ymwl_ 状态:✓连通
+        $line = sprintf(
+            '%s%s %s %s:%s 库:%s 字符集:%s',
+            $name,
+            $isDefault ? '[默认]' : '',
+            $driver,
+            $host,
+            $port,
+            $database,
+            $charset
+        );
 
-        return $output;
+        if ($prefix !== '') {
+            $line .= " 前缀:{$prefix}";
+        }
+
+        $line .= ' 状态:' . ($ok ? '✓连通' : '✗失败');
+        if ($msg !== '') {
+            $line .= " ({$msg})";
+        }
+
+        return $line . "\n";
     }
 
     /**

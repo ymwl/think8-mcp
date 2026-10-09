@@ -11,6 +11,9 @@ use think\App;
  */
 class RoutesTool implements ToolInterface
 {
+    /** 静态分析中发现的 Route::group 数量（分组内路由无法被当前正则完整解析） */
+    private int $unparsedGroupCount = 0;
+
     public function __construct(
         private App $app
     ) {}
@@ -36,53 +39,39 @@ class RoutesTool implements ToolInterface
 
     public function execute(array $params): string
     {
+        $this->unparsedGroupCount = 0;
+
         $routes = $this->collectRoutes();
 
         if (empty($routes)) {
             return "未找到任何路由定义。\n\n可能的原因：\n1. route/ 目录不存在\n2. 路由文件为空\n3. 未定义任何路由规则";
         }
 
-        $output = "ThinkPHP 路由列表\n";
-        $output .= str_repeat('=', 80) . "\n\n";
-
         $grouped = [];
         foreach ($routes as $route) {
             $grouped[$route['source']][] = $route;
         }
 
+        $output = sprintf("路由列表（共 %d 条）\n", count($routes));
+
         foreach ($grouped as $source => $sourceRoutes) {
-            $output .= "来源文件: {$source}\n";
-            $output .= str_repeat('-', 60) . "\n";
-
-            $maxMethod = max(array_map(fn($r) => strlen($r['method']), $sourceRoutes));
-            $maxUri    = max(array_map(fn($r) => strlen($r['uri']), $sourceRoutes));
-
-            $output .= sprintf(
-                "%-{$maxMethod}s  %-{$maxUri}s  %s\n",
-                '方法',
-                'URI',
-                '处理器'
-            );
-            $output .= str_repeat('-', 60) . "\n";
+            $output .= "\n[{$source}]\n";
 
             foreach ($sourceRoutes as $route) {
                 $middleware = !empty($route['middleware'])
-                    ? '  [中间件: ' . implode(', ', $route['middleware']) . ']'
+                    ? '  mw:' . implode(',', $route['middleware'])
                     : '';
 
-                $output .= sprintf(
-                    "%-{$maxMethod}s  %-{$maxUri}s  %s%s\n",
-                    $route['method'],
-                    $route['uri'],
-                    $route['handler'],
-                    $middleware
-                );
+                $output .= "{$route['method']} {$route['uri']} -> {$route['handler']}{$middleware}\n";
             }
-
-            $output .= "\n";
         }
 
-        $output .= sprintf("共 %d 条路由规则\n", count($routes));
+        if ($this->unparsedGroupCount > 0) {
+            $output .= sprintf(
+                "\n注意：检测到 %d 处 Route::group，组内路由可能未被完整解析（本结果为静态正则分析）。\n",
+                $this->unparsedGroupCount
+            );
+        }
 
         return $output;
     }
@@ -208,6 +197,11 @@ class RoutesTool implements ToolInterface
     private function parseRouteFile(string $content, string $filename): array
     {
         $routes = [];
+
+        // 统计 Route::group：分组内路由无法被当前正则静态解析，仅用于输出完整性提示
+        if (preg_match_all('/Route\s*::\s*group\s*\(/i', $content, $groupMatches) > 0) {
+            $this->unparsedGroupCount += count($groupMatches[0]);
+        }
 
         // 匹配常见路由定义模式
         // Route::get('/path', 'Controller/action')

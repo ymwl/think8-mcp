@@ -17,6 +17,9 @@ class LastErrorTool implements ToolInterface
     /** 最多向上追溯的字节数（4MB），防止扫描超大日志 */
     private const MAX_SCAN_BYTES = 4 * 1024 * 1024;
 
+    /** 调用栈默认保留帧数 */
+    private const DEFAULT_TRACE_DEPTH = 10;
+
     public function __construct(
         private App $app
     ) {}
@@ -28,24 +31,70 @@ class LastErrorTool implements ToolInterface
 
     public function getDescription(): string
     {
-        return '从 ThinkPHP 运行时日志中提取最近一条异常/错误，用于快速定位问题。';
+        return '从 ThinkPHP 运行时日志中提取最近一条异常/错误（优先 *_error.log，再回退最新日志；可指定日期；调用栈默认保留前 10 帧，trace_depth=0 不限制）。';
     }
 
     public function getInputSchema(): array
     {
         return [
             'type'       => 'object',
-            'properties' => (object)[],
-            'required'   => [],
+            'properties' => [
+                'date' => [
+                    'type'        => 'string',
+                    'description' => '日志日期，格式 YYYYMMDD（可选），不填则查最新日志',
+                    'pattern'     => '^[0-9]{8}$',
+                ],
+                'trace_depth' => [
+                    'type'        => 'integer',
+                    'description' => '调用栈保留帧数（默认 10，0 表示不限制，上限 200）',
+                    'minimum'     => 0,
+                    'maximum'     => 200,
+                ],
+            ],
+            'required' => [],
         ];
     }
 
     public function execute(array $params): string
     {
+        $date       = isset($params['date']) ? trim((string)$params['date']) : null;
+        $traceDepth = isset($params['trace_depth']) ? (int)$params['trace_depth'] : self::DEFAULT_TRACE_DEPTH;
+        $traceDepth = min(max($traceDepth, 0), 200);
+
+        if ($date !== null && $date !== '' && !preg_match('/^\d{8}$/', $date)) {
+            return "错误：date 参数格式不正确，应为 YYYYMMDD，例如 \"20240516\"。";
+        }
+
         $logPath = $this->getLogPath();
 
         if (!is_dir($logPath)) {
             return "日志目录不存在：{$logPath}\n\nThinkPHP 应用需要先运行才会生成日志目录。";
+        }
+
+        // 指定日期：按候选路径逐个尝试（*_error.log 优先）
+        if ($date !== null && $date !== '') {
+            foreach ($this->logDateCandidates($logPath, $date, true) as $candidate) {
+                if (!is_file($candidate)) {
+                    continue;
+                }
+
+                $result = $this->extractLastError($candidate, $traceDepth);
+                if ($result['found']) {
+                    return $result['text'];
+                }
+            }
+
+            return "在日期 {$date} 的日志文件中未找到错误记录。\n\n已搜索以下路径：\n"
+                . implode("\n", $this->logDateCandidates($logPath, $date, true));
+        }
+
+        // 未指定日期：优先专门的错误日志（如 apart_level 分离出的 *_error.log），再回退最新日志
+        $errorLog = $this->findLatestLogFile($logPath, '_error.log');
+        if ($errorLog !== null) {
+            $result = $this->extractLastError($errorLog, $traceDepth);
+            if ($result['found']) {
+                return $result['text'];
+            }
         }
 
         $logFile = $this->findLatestLogFile($logPath);
@@ -54,23 +103,39 @@ class LastErrorTool implements ToolInterface
             return "日志目录 {$logPath} 中没有找到任何日志文件。";
         }
 
-        return $this->extractLastError($logFile);
+        $result = $this->extractLastError($logFile, $traceDepth);
+        if ($result['found']) {
+            return $result['text'];
+        }
+
+        if ($result['text'] !== '') {
+            return $result['text'];
+        }
+
+        return "在日志文件 {$logFile} 中未找到错误记录。\n\n日志文件末尾内容（最后 10 行）：\n"
+            . rtrim($this->readTailLines($logFile, 10), "\n");
     }
 
-    private function extractLastError(string $filePath): string
+    /**
+     * 从日志文件提取最近一条错误
+     *
+     * @return array{found: bool, text: string} found=false 时 text 为失败原因（打不开/为空等），
+     *         空字符串表示"文件中未发现错误块"
+     */
+    private function extractLastError(string $filePath, int $traceDepth): array
     {
         if (!is_readable($filePath)) {
-            return "无法读取日志文件：{$filePath}（权限不足）";
+            return ['found' => false, 'text' => "无法读取日志文件：{$filePath}（权限不足）"];
         }
 
         $fileSize = @filesize($filePath);
         if ($fileSize === false || $fileSize === 0) {
-            return "日志文件为空：{$filePath}";
+            return ['found' => false, 'text' => "日志文件为空：{$filePath}"];
         }
 
         $fp = fopen($filePath, 'r');
         if ($fp === false) {
-            return "无法打开日志文件：{$filePath}";
+            return ['found' => false, 'text' => "无法打开日志文件：{$filePath}"];
         }
 
         try {
@@ -80,7 +145,7 @@ class LastErrorTool implements ToolInterface
         }
 
         if ($content === '') {
-            return "日志文件内容为空：{$filePath}";
+            return ['found' => false, 'text' => "日志文件内容为空：{$filePath}"];
         }
 
         $lines = array_values(array_filter(
@@ -89,21 +154,19 @@ class LastErrorTool implements ToolInterface
         ));
 
         if (empty($lines)) {
-            return "日志文件中没有有效内容：{$filePath}";
+            return ['found' => false, 'text' => "日志文件中没有有效内容：{$filePath}"];
         }
 
-        $errorBlock = $this->findLastErrorBlock($lines);
+        $errorBlock = $this->findLastErrorBlock($lines, $traceDepth);
 
         if ($errorBlock === null) {
-            return "在日志文件 {$filePath} 中未找到错误记录。\n\n日志文件末尾内容（最后10行）：\n"
-                . implode("\n", array_slice($lines, -10));
+            return ['found' => false, 'text' => ''];
         }
 
-        $output  = "日志文件：{$filePath}\n";
-        $output .= str_repeat('=', 80) . "\n\n";
-        $output .= $errorBlock;
-
-        return $output;
+        return [
+            'found' => true,
+            'text'  => "日志文件：{$filePath}\n\n" . $errorBlock,
+        ];
     }
 
     /**
@@ -111,7 +174,7 @@ class LastErrorTool implements ToolInterface
      *
      * @param string[] $lines
      */
-    private function findLastErrorBlock(array $lines): ?string
+    private function findLastErrorBlock(array $lines, int $traceDepth): ?string
     {
         $totalLines   = count($lines);
         $lastErrorIdx = null;
@@ -149,6 +212,7 @@ class LastErrorTool implements ToolInterface
         }
 
         $blockLines = array_slice($lines, $blockStart, $blockEnd - $blockStart + 1);
+        $blockLines = $this->trimTraceFrames($blockLines, $traceDepth);
         $firstLine  = $blockLines[0] ?? '';
         $meta       = $this->parseLogMeta($firstLine);
 
@@ -172,6 +236,42 @@ class LastErrorTool implements ToolInterface
             || stripos($line, '[error]') !== false
             || str_contains($line, 'Exception')
             || str_contains($line, '#0 ');
+    }
+
+    /**
+     * 截断调用栈帧（#N 行）到指定深度，0 表示不限制
+     *
+     * @param string[] $blockLines
+     * @return string[]
+     */
+    private function trimTraceFrames(array $blockLines, int $traceDepth): array
+    {
+        if ($traceDepth <= 0) {
+            return $blockLines;
+        }
+
+        $result  = [];
+        $kept    = 0;
+        $omitted = 0;
+
+        foreach ($blockLines as $line) {
+            if (preg_match('/^\s*#\d+\s/', $line) === 1) {
+                if ($kept < $traceDepth) {
+                    $result[] = $line;
+                    $kept++;
+                } else {
+                    if ($omitted === 0) {
+                        $result[] = '... [调用栈已省略后续帧（可用 trace_depth 调整，0=不限制）]';
+                    }
+                    $omitted++;
+                }
+                continue;
+            }
+
+            $result[] = $line;
+        }
+
+        return $result;
     }
 
     private function isNewLogEntry(string $line): bool

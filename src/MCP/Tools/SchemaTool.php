@@ -11,8 +11,6 @@ use think\App;
  */
 class SchemaTool implements ToolInterface
 {
-    private const CACHE_TTL = 20; // 秒
-
     public function __construct(
         private App $app
     ) {}
@@ -24,7 +22,7 @@ class SchemaTool implements ToolInterface
 
     public function getDescription(): string
     {
-        return '查询 ThinkPHP 应用的数据库表结构，包括字段名、类型、是否可空、默认值和注释。可指定单张表或获取全部表结构。';
+        return '查询数据库表：默认只返回表名清单（可用 pattern 按子串过滤）；指定 table 返回该表详细结构；指定 column 反查包含该字段的表。';
     }
 
     public function getInputSchema(): array
@@ -34,7 +32,15 @@ class SchemaTool implements ToolInterface
             'properties' => [
                 'table' => [
                     'type'        => 'string',
-                    'description' => '要查询的数据库表名（可选）。不填则返回所有表的结构。',
+                    'description' => '要查看详细结构的表名（可选）。不填则只返回表名清单。',
+                ],
+                'pattern' => [
+                    'type'        => 'string',
+                    'description' => '按表名子串过滤（不区分大小写），返回匹配的表名清单。仅在未指定 table 时生效。',
+                ],
+                'column' => [
+                    'type'        => 'string',
+                    'description' => '反查包含指定字段名（精确匹配）的表，适合定位"某字段在哪些表里"。',
                 ],
             ],
             'required' => [],
@@ -43,7 +49,9 @@ class SchemaTool implements ToolInterface
 
     public function execute(array $params): string
     {
-        $targetTable = isset($params['table']) ? trim((string)$params['table']) : null;
+        $targetTable  = isset($params['table']) ? trim((string)$params['table']) : null;
+        $pattern      = isset($params['pattern']) ? trim((string)$params['pattern']) : null;
+        $targetColumn = isset($params['column']) ? trim((string)$params['column']) : null;
 
         try {
             $pdo = $this->getPdo();
@@ -56,7 +64,11 @@ class SchemaTool implements ToolInterface
                 return $this->describeTable($pdo, $targetTable);
             }
 
-            return $this->describeAllTables($pdo);
+            if ($targetColumn !== null && $targetColumn !== '') {
+                return $this->findColumn($pdo, $targetColumn);
+            }
+
+            return $this->listTables($pdo, $pattern);
         } catch (\Throwable $e) {
             return "查询数据库结构时出错：{$e->getMessage()}";
         }
@@ -160,55 +172,71 @@ class SchemaTool implements ToolInterface
     }
 
     /**
-     * 描述所有表的结构（带 20 秒文件缓存）
+     * 反查包含指定字段名的表（精确匹配字段名）
      */
-    private function describeAllTables(\PDO $pdo): string
+    private function findColumn(\PDO $pdo, string $column): string
     {
-        $cacheFile = $this->getCacheFile();
-
-        if ($cacheFile !== null && is_file($cacheFile)) {
-            $mtime = filemtime($cacheFile);
-            if ($mtime !== false && (time() - $mtime) < self::CACHE_TTL) {
-                $cached = file_get_contents($cacheFile);
-                if ($cached !== false && $cached !== '') {
-                    return $cached;
-                }
-            }
+        if (!preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $column)) {
+            return "字段名格式不合法：{$column}";
         }
 
-        $stmt   = $pdo->query('SHOW TABLES');
-        $tables = $stmt->fetchAll(\PDO::FETCH_COLUMN);
+        $stmt = $pdo->prepare(
+            'SELECT TABLE_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_COMMENT
+             FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE() AND COLUMN_NAME = ?
+             ORDER BY TABLE_NAME'
+        );
+        $stmt->execute([$column]);
+        $rows = $stmt->fetchAll();
+
+        if (empty($rows)) {
+            return "没有任何表包含字段 \"{$column}\"（精确匹配）。";
+        }
+
+        $output = sprintf("包含字段 \"%s\" 的表（%d 张）：\n", $column, count($rows));
+
+        foreach ($rows as $row) {
+            $line = $row['TABLE_NAME'] . '  ' . $row['COLUMN_TYPE']
+                . ($row['IS_NULLABLE'] === 'YES' ? '  NULL' : '  NOT NULL');
+
+            if (!empty($row['COLUMN_COMMENT'])) {
+                $line .= '  ' . $row['COLUMN_COMMENT'];
+            }
+
+            $output .= $line . "\n";
+        }
+
+        return rtrim($output, "\n");
+    }
+
+    /**
+     * 返回表名清单（默认输出，紧凑一行一表，避免整库结构灌入上下文）
+     */
+    private function listTables(\PDO $pdo, ?string $pattern): string
+    {
+        $tables = $pdo->query('SHOW TABLES')->fetchAll(\PDO::FETCH_COLUMN);
 
         if (empty($tables)) {
             return "数据库中没有任何数据表。";
         }
 
-        $output = sprintf("数据库共有 %d 张表\n", count($tables));
-        $output .= str_repeat('=', 80) . "\n\n";
+        if ($pattern !== null && $pattern !== '') {
+            $tables = array_values(array_filter(
+                $tables,
+                static fn($table): bool => stripos((string)$table, $pattern) !== false
+            ));
 
-        foreach ($tables as $table) {
-            $output .= $this->describeTable($pdo, $table);
-            $output .= "\n";
-        }
-
-        if ($cacheFile !== null) {
-            @file_put_contents($cacheFile, $output);
-        }
-
-        return $output;
-    }
-
-    private function getCacheFile(): ?string
-    {
-        try {
-            $cacheDir = rtrim($this->app->getRuntimePath(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'cache';
-            if (!is_dir($cacheDir) && !mkdir($cacheDir, 0755, true) && !is_dir($cacheDir)) {
-                return null;
+            if (empty($tables)) {
+                return "没有匹配 \"{$pattern}\" 的数据表。\n\n提示：pattern 为表名子串（不区分大小写）。";
             }
-            return $cacheDir . DIRECTORY_SEPARATOR . 'mcp_schema.cache';
-        } catch (\Throwable) {
-            return null;
+
+            return sprintf("匹配 \"%s\" 的表（%d 张）：\n", $pattern, count($tables))
+                . implode("\n", $tables);
         }
+
+        return sprintf("数据库共有 %d 张表：\n", count($tables))
+            . implode("\n", $tables)
+            . "\n\n提示：传 table 查看单表详细结构；传 pattern 按子串过滤表名。";
     }
 
     /**
@@ -228,9 +256,6 @@ class SchemaTool implements ToolInterface
             return "表 `{$table}` 不存在。";
         }
 
-        $output = "表: {$table}\n";
-        $output .= str_repeat('-', 60) . "\n";
-
         // 获取字段信息
         $stmt    = $pdo->query("DESCRIBE `{$table}`");
         $columns = $stmt->fetchAll();
@@ -238,75 +263,66 @@ class SchemaTool implements ToolInterface
         // 获取字段注释（通过 INFORMATION_SCHEMA）
         $comments = $this->getColumnComments($pdo, $table);
 
-        // 表头
-        $output .= sprintf(
-            "%-25s %-20s %-8s %-10s %-15s %s\n",
-            '字段名',
-            '类型',
-            '可空',
-            '键',
-            '默认值',
-            '注释'
-        );
-        $output .= str_repeat('-', 100) . "\n";
+        // 紧凑格式：每字段一行、双空格分隔，不做定宽对齐
+        $output = "表 {$table}（" . count($columns) . " 个字段）\n";
 
         foreach ($columns as $column) {
-            $fieldName = $column['Field'];
-            $type      = $column['Type'];
-            $nullable  = $column['Null'] === 'YES' ? '是' : '否';
-            $key       = $column['Key'] ?? '';
-            $default   = $column['Default'] ?? 'NULL';
-            $extra     = $column['Extra'] ?? '';
-            $comment   = $comments[$fieldName] ?? '';
+            $parts = [
+                $column['Field'],
+                $column['Type'],
+                $column['Null'] === 'YES' ? 'NULL' : 'NOT NULL',
+            ];
 
-            if ($extra) {
-                $type .= " ({$extra})";
+            $key = $column['Key'] ?? '';
+            if ($key !== '') {
+                $parts[] = match ($key) {
+                    'PRI' => 'PRIMARY',
+                    'UNI' => 'UNIQUE',
+                    'MUL' => 'INDEX',
+                    default => $key,
+                };
             }
 
-            $keyLabel = match ($key) {
-                'PRI' => 'PRIMARY',
-                'UNI' => 'UNIQUE',
-                'MUL' => 'INDEX',
-                default => $key,
-            };
+            $extra = $column['Extra'] ?? '';
+            if ($extra !== '') {
+                $parts[] = $extra;
+            }
 
-            $output .= sprintf(
-                "%-25s %-20s %-8s %-10s %-15s %s\n",
-                $fieldName,
-                $type,
-                $nullable,
-                $keyLabel,
-                $default === null ? 'NULL' : (string)$default,
-                $comment
-            );
+            $default = $column['Default'] ?? null;
+            if ($default !== null) {
+                $parts[] = "默认:" . ($default === '' ? "''" : (string)$default);
+            }
+
+            $comment = $comments[$column['Field']] ?? '';
+            if ($comment !== '') {
+                $parts[] = $comment;
+            }
+
+            $output .= implode('  ', $parts) . "\n";
         }
 
-        // 获取索引信息
-        $output .= "\n索引:\n";
+        // 索引信息：单行紧凑展示，如 PRIMARY(id); idx_name(UNIQUE: name)
         try {
-            $stmt    = $pdo->query("SHOW INDEX FROM `{$table}`");
-            $indexes = $stmt->fetchAll();
+            $indexes = $pdo->query("SHOW INDEX FROM `{$table}`")->fetchAll();
 
             $indexGroups = [];
             foreach ($indexes as $index) {
                 $name = $index['Key_name'];
-                $indexGroups[$name][] = $index['Column_name'];
+                $indexGroups[$name]['columns'][] = $index['Column_name'];
+                $indexGroups[$name]['unique']    = ((int)($index['Non_unique'] ?? 1)) === 0;
             }
 
-            foreach ($indexGroups as $name => $columns) {
-                $type = $name === 'PRIMARY' ? 'PRIMARY KEY' : (
-                    isset($indexes[array_key_first(array_filter(
-                        $indexes,
-                        fn($i) => $i['Key_name'] === $name
-                    ))]['Non_unique']) && $indexes[array_key_first(array_filter(
-                        $indexes,
-                        fn($i) => $i['Key_name'] === $name
-                    ))]['Non_unique'] == 0 ? 'UNIQUE' : 'INDEX'
-                );
-                $output .= sprintf("  %-15s %-10s %s\n", $name, $type, implode(', ', $columns));
+            $indexParts = [];
+            foreach ($indexGroups as $name => $info) {
+                $type         = $name === 'PRIMARY' ? '' : ($info['unique'] ? 'UNIQUE: ' : 'INDEX: ');
+                $indexParts[] = $name . '(' . $type . implode(',', $info['columns']) . ')';
+            }
+
+            if (!empty($indexParts)) {
+                $output .= '索引: ' . implode('; ', $indexParts) . "\n";
             }
         } catch (\Throwable $e) {
-            $output .= "  (无法获取索引信息)\n";
+            // 忽略索引获取失败
         }
 
         return $output;
