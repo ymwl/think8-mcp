@@ -27,6 +27,12 @@ return [
         'run_php'          => true,
         'format_code'      => true,
         'get_absolute_url' => true,
+        'log_summary'      => true,
+        'probe_http'       => true,
+        'explain_url'      => true,
+        'inspect_addon'    => true,
+        'db_backup'        => true,
+        'inspect_template' => true,
     ],
 
     /*
@@ -38,6 +44,19 @@ return [
     | 例如：[\app\mcp\AddonInfoTool::class]
     */
     'custom_tools' => [],
+
+    /*
+    |--------------------------------------------------------------------------
+    | HTTP 探测配置（probe_http 工具）
+    |--------------------------------------------------------------------------
+    | allowed_hosts：追加允许探测的 host（回环地址与解析到回环的本机域名始终放行）
+    | timeout：请求总超时秒数；max_body：响应体最大展示字符数
+    */
+    'probe' => [
+        'allowed_hosts' => [],
+        'timeout'       => 5,
+        'max_body'      => 3000,
+    ],
 
     /*
     |--------------------------------------------------------------------------

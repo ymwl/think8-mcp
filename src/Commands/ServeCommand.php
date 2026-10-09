@@ -36,6 +36,12 @@ class ServeCommand extends Command
         'run_php'          => \ymwl\think8mcp\MCP\Tools\RunPhpTool::class,
         'format_code'      => \ymwl\think8mcp\MCP\Tools\FormatCodeTool::class,
         'get_absolute_url' => \ymwl\think8mcp\MCP\Tools\GetAbsoluteUrlTool::class,
+        'log_summary'      => \ymwl\think8mcp\MCP\Tools\LogSummaryTool::class,
+        'probe_http'       => \ymwl\think8mcp\MCP\Tools\ProbeHttpTool::class,
+        'explain_url'      => \ymwl\think8mcp\MCP\Tools\ExplainUrlTool::class,
+        'inspect_addon'    => \ymwl\think8mcp\MCP\Tools\InspectAddonTool::class,
+        'db_backup'        => \ymwl\think8mcp\MCP\Tools\DbBackupTool::class,
+        'inspect_template' => \ymwl\think8mcp\MCP\Tools\InspectTemplateTool::class,
     ];
 
     protected function configure(): void

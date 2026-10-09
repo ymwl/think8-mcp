@@ -10,7 +10,7 @@
 
 - **纯 PHP 实现**，不依赖 Node.js，通过 stdio 传输 JSON-RPC 2.0
 - **自动注册**，ThinkPHP 8.x 通过 `extra.think.services` 发现服务提供者，仅注册 console 命令，不注册任何 HTTP 路由或中间件，**对线上 web 请求零影响**
-- **12 个内置工具**：路由、表结构、日志、配置、错误、SQL、PHP 执行等
+- **18 个内置工具**：路由、表结构、日志、配置、错误、SQL、PHP 执行、日志摘要、HTTP 探测、URL 归因、插件体检、单表备份、模板编译产物等
 - **Skills / Guidelines / Prompts** 扩展机制
 - **自定义工具扩展点**：宿主项目可在配置中登记自己的 MCP 工具类
 - **MCP 协议版本**：2025-11-25（兼容 2025-06-18、2025-03-26、2024-11-05）
@@ -122,7 +122,7 @@ php think list
 
 ## 可用工具列表
 
-AI 工具连接后可使用以下 12 个 MCP 工具（均可在 `config/mcp.php` 的 `tools` 段单独开关）：
+AI 工具连接后可使用以下 18 个 MCP 工具（均可在 `config/mcp.php` 的 `tools` 段单独开关）：
 
 | 工具名 | 说明 |
 | --- | --- |
@@ -138,6 +138,12 @@ AI 工具连接后可使用以下 12 个 MCP 工具（均可在 `config/mcp.php`
 | `run_php` | 执行 PHP 代码片段（高危，默认开启，建议生产关闭） |
 | `format_code` | 使用 php-cs-fixer 格式化代码（需已安装） |
 | `get_absolute_url` | 生成指定路由的绝对 URL |
+| `get_log_summary` | 日志全景摘要：按级别计数 + Top 错误/警告聚合（次数、首末时间），跨常规与 `*_error` 日志 |
+| `probe_http` | 发起真实 HTTP 请求探测本机站点（host 白名单，见下文），验证路由/伪静态/验证码/接口 |
+| `explain_url` | 解释 URL 命中的路由规则，并检查处理器类/方法是否存在（定位 404 掩盖类问题） |
+| `inspect_addon` | 插件状态一览：目录/数据库/静态资源交叉比对，标注版本不一致与缺失 |
+| `db_backup` | 按项目数据库配置导出单表（结构+数据）到 `runtime/backup/`，高危操作前的备份动作 |
+| `inspect_template` | 定位模板源文件与编译产物（`runtime/temp`），含编译时效性判定与内容片段查看 |
 
 ### `execute_sql` 安全校验
 
@@ -152,6 +158,10 @@ AI 工具连接后可使用以下 12 个 MCP 工具（均可在 `config/mcp.php`
 ### `run_think_command` 安全限制
 
 默认禁止：`serve`、`clear`、`optimize`、`build`、`mcp:serve`，可在 `config/mcp.php` 的 `commands.forbidden` 中扩展。
+
+### `probe_http` 白名单限制
+
+仅允许请求白名单内的 host：回环地址（`127.0.0.1` / `localhost` / `::1`）与**解析到回环地址的本机域名**（如 hosts 中指向 `127.0.0.1` 的开发域名）始终放行；其他域名需在 `config/mcp.php` 的 `probe.allowed_hosts` 中追加。仅支持 `GET` / `HEAD` / `POST`，默认不跟随重定向，响应体截断返回，`Set-Cookie` 仅展示名称。
 
 ---
 
@@ -175,10 +185,23 @@ return [
         'run_php'          => true,
         'format_code'      => true,
         'get_absolute_url' => true,
+        'log_summary'      => true,
+        'probe_http'       => true,
+        'explain_url'      => true,
+        'inspect_addon'    => true,
+        'db_backup'        => true,
+        'inspect_template' => true,
     ],
 
     // 自定义工具类（须实现 ymwl\think8mcp\MCP\Tools\ToolInterface）
     'custom_tools' => [],
+
+    // HTTP 探测配置（probe_http 工具）
+    'probe' => [
+        'allowed_hosts' => [],   // 追加白名单 host（回环地址与解析到回环的本机域名始终放行）
+        'timeout'       => 5,    // 请求总超时秒数
+        'max_body'      => 3000, // 响应体最大展示字符数
+    ],
 
     // 日志配置
     'logs' => [
@@ -250,6 +273,7 @@ class AddonInfoTool implements ToolInterface
 1. `execute_sql` 能读取全库数据，`run_php` 可执行任意 PHP 代码——两者均属开发后门，**生产或有敏感数据的环境请将 `security` 段对应开关设为 `false`**。
 2. `mcp:serve` 是常驻进程，由 AI 工具负责其生命周期，退出 AI 工具时进程随之终止。
 3. MCP 协议要求 JSON-RPC 响应必须从 STDOUT 输出，任何日志/调试信息均写入 STDERR，本包严格遵守此规则。
+4. `probe_http` 会向白名单内的本机地址发起真实请求（默认仅回环地址与本机域名）；`db_backup` 仅将备份文件写入项目 `runtime/backup/` 目录，不修改数据库。
 
 ---
 

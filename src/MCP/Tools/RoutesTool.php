@@ -39,9 +39,7 @@ class RoutesTool implements ToolInterface
 
     public function execute(array $params): string
     {
-        $this->unparsedGroupCount = 0;
-
-        $routes = $this->collectRoutes();
+        $routes = $this->collectRouteList();
 
         if (empty($routes)) {
             return "未找到任何路由定义。\n\n可能的原因：\n1. route/ 目录不存在\n2. 路由文件为空\n3. 未定义任何路由规则";
@@ -74,6 +72,18 @@ class RoutesTool implements ToolInterface
         }
 
         return $output;
+    }
+
+    /**
+     * 收集路由清单（供 get_routes 展示与 explain_url 等工具复用）
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function collectRouteList(): array
+    {
+        $this->unparsedGroupCount = 0;
+
+        return $this->collectRoutes();
     }
 
     /**
